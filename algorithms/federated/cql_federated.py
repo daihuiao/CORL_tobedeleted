@@ -3,6 +3,7 @@
 import os
 import random
 import uuid
+import copy
 from copy import deepcopy
 from dataclasses import asdict, dataclass
 from pathlib import Path
@@ -15,6 +16,8 @@ import pyrallis
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from tqdm import trange
+
 import wandb
 from torch.distributions import Normal, TanhTransform, TransformedDistribution
 
@@ -24,12 +27,12 @@ TensorBatch = List[torch.Tensor]
 @dataclass
 class TrainConfig:
     # Experiment
-    device: str = "cuda"
+    device: str = "cuda:1"
     env: str = "halfcheetah-medium-expert-v2"  # OpenAI gym environment name
     seed: int = 0  # Sets Gym, PyTorch and Numpy seeds
-    eval_freq: int = int(5e3)  # How often (time steps) we evaluate
+    eval_freq: int = int(1e4)  # How often (time steps) we evaluate
     n_episodes: int = 10  # How many episodes run during evaluation
-    max_timesteps: int = int(1e6)  # Max time steps to run environment
+    max_timesteps: int = int(2e6)  # Max time steps to run environment
     checkpoints_path: Optional[str] = None  # Save path
     load_model: str = ""  # Model load file name, "" doesn't load
 
@@ -67,14 +70,19 @@ class TrainConfig:
     policy_log_std_multiplier: float = 1.0
 
     # Wandb logging
-    project: str = "CORL"
-    group: str = "CQL-D4RL"
+    project: str = "paper2_cql"
+    # group: str = "CQL-D4RL"
     name: str = "CQL"
+    num_agents: int = 3
+    federated_node_iterations: int = 10000
 
     def __post_init__(self):
-        self.name = f"{self.name}-{self.env}-{str(uuid.uuid4())[:8]}"
+        self.name = f"{self.env}-seed{self.seed}-num_agents{self.num_agents}-{self.name}-{str(uuid.uuid4())[:8]}"
         if self.checkpoints_path is not None:
             self.checkpoints_path = os.path.join(self.checkpoints_path, self.name)
+
+
+os.environ["WANDB_API_KEY"] = "b4fdd4e5e894cba0eda9610de6f9f04b87a86453"
 
 
 def soft_update(target: nn.Module, source: nn.Module, tau: float):
@@ -93,15 +101,15 @@ def normalize_states(states: np.ndarray, mean: np.ndarray, std: np.ndarray):
 
 
 def wrap_env(
-    env: gym.Env,
-    state_mean: Union[np.ndarray, float] = 0.0,
-    state_std: Union[np.ndarray, float] = 1.0,
-    reward_scale: float = 1.0,
+        env: gym.Env,
+        state_mean: Union[np.ndarray, float] = 0.0,
+        state_std: Union[np.ndarray, float] = 1.0,
+        reward_scale: float = 1.0,
 ) -> gym.Env:
     # PEP 8: E731 do not assign a lambda expression, use a def
     def normalize_state(state):
         return (
-            state - state_mean
+                state - state_mean
         ) / state_std  # epsilon should be already added in std.
 
     def scale_reward(reward):
@@ -116,11 +124,11 @@ def wrap_env(
 
 class ReplayBuffer:
     def __init__(
-        self,
-        state_dim: int,
-        action_dim: int,
-        buffer_size: int,
-        device: str = "cpu",
+            self,
+            state_dim: int,
+            action_dim: int,
+            buffer_size: int,
+            device: str = "cpu",
     ):
         self._buffer_size = buffer_size
         self._pointer = 0
@@ -177,7 +185,7 @@ class ReplayBuffer:
 
 
 def set_seed(
-    seed: int, env: Optional[gym.Env] = None, deterministic_torch: bool = False
+        seed: int, env: Optional[gym.Env] = None, deterministic_torch: bool = False
 ):
     if env is not None:
         env.seed(seed)
@@ -193,17 +201,17 @@ def wandb_init(config: dict) -> None:
     wandb.init(
         config=config,
         project=config["project"],
-        group=config["group"],
+        group=config["env"],
         name=config["name"],
         id=str(uuid.uuid4()),
-        mode="disabled",
+        # mode="disabled",
     )
     wandb.run.save()
 
 
 @torch.no_grad()
 def eval_actor(
-    env: gym.Env, actor: nn.Module, device: str, n_episodes: int, seed: int
+        env: gym.Env, actor: nn.Module, device: str, n_episodes: int, seed: int
 ) -> np.ndarray:
     env.seed(seed)
     actor.eval()
@@ -237,11 +245,11 @@ def return_reward_range(dataset: Dict, max_episode_steps: int) -> Tuple[float, f
 
 
 def modify_reward(
-    dataset: Dict,
-    env_name: str,
-    max_episode_steps: int = 1000,
-    reward_scale: float = 1.0,
-    reward_bias: float = 0.0,
+        dataset: Dict,
+        env_name: str,
+        max_episode_steps: int = 1000,
+        reward_scale: float = 1.0,
+        reward_bias: float = 0.0,
 ):
     if any(s in env_name for s in ("halfcheetah", "hopper", "walker2d")):
         min_ret, max_ret = return_reward_range(dataset, max_episode_steps)
@@ -274,7 +282,7 @@ def init_module_weights(module: torch.nn.Sequential, orthogonal_init: bool = Fal
 
 class ReparameterizedTanhGaussian(nn.Module):
     def __init__(
-        self, log_std_min: float = -20.0, log_std_max: float = 2.0, no_tanh: bool = False
+            self, log_std_min: float = -20.0, log_std_max: float = 2.0, no_tanh: bool = False
     ):
         super().__init__()
         self.log_std_min = log_std_min
@@ -282,7 +290,7 @@ class ReparameterizedTanhGaussian(nn.Module):
         self.no_tanh = no_tanh
 
     def log_prob(
-        self, mean: torch.Tensor, log_std: torch.Tensor, sample: torch.Tensor
+            self, mean: torch.Tensor, log_std: torch.Tensor, sample: torch.Tensor
     ) -> torch.Tensor:
         log_std = torch.clamp(log_std, self.log_std_min, self.log_std_max)
         std = torch.exp(log_std)
@@ -295,7 +303,7 @@ class ReparameterizedTanhGaussian(nn.Module):
         return torch.sum(action_distribution.log_prob(sample), dim=-1)
 
     def forward(
-        self, mean: torch.Tensor, log_std: torch.Tensor, deterministic: bool = False
+            self, mean: torch.Tensor, log_std: torch.Tensor, deterministic: bool = False
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         log_std = torch.clamp(log_std, self.log_std_min, self.log_std_max)
         std = torch.exp(log_std)
@@ -319,14 +327,14 @@ class ReparameterizedTanhGaussian(nn.Module):
 
 class TanhGaussianPolicy(nn.Module):
     def __init__(
-        self,
-        state_dim: int,
-        action_dim: int,
-        max_action: float,
-        log_std_multiplier: float = 1.0,
-        log_std_offset: float = -1.0,
-        orthogonal_init: bool = False,
-        no_tanh: bool = False,
+            self,
+            state_dim: int,
+            action_dim: int,
+            max_action: float,
+            log_std_multiplier: float = 1.0,
+            log_std_offset: float = -1.0,
+            orthogonal_init: bool = False,
+            no_tanh: bool = False,
     ):
         super().__init__()
         self.observation_dim = state_dim
@@ -352,7 +360,7 @@ class TanhGaussianPolicy(nn.Module):
         self.tanh_gaussian = ReparameterizedTanhGaussian(no_tanh=no_tanh)
 
     def log_prob(
-        self, observations: torch.Tensor, actions: torch.Tensor
+            self, observations: torch.Tensor, actions: torch.Tensor
     ) -> torch.Tensor:
         if actions.ndim == 3:
             observations = extend_and_repeat(observations, 1, actions.shape[1])
@@ -363,10 +371,10 @@ class TanhGaussianPolicy(nn.Module):
         return log_probs
 
     def forward(
-        self,
-        observations: torch.Tensor,
-        deterministic: bool = False,
-        repeat: bool = None,
+            self,
+            observations: torch.Tensor,
+            deterministic: bool = False,
+            repeat: bool = None,
     ) -> Tuple[torch.Tensor, torch.Tensor]:
         if repeat is not None:
             observations = extend_and_repeat(observations, 1, repeat)
@@ -386,11 +394,11 @@ class TanhGaussianPolicy(nn.Module):
 
 class FullyConnectedQFunction(nn.Module):
     def __init__(
-        self,
-        observation_dim: int,
-        action_dim: int,
-        orthogonal_init: bool = False,
-        n_hidden_layers: int = 3,
+            self,
+            observation_dim: int,
+            action_dim: int,
+            orthogonal_init: bool = False,
+            n_hidden_layers: int = 3,
     ):
         super().__init__()
         self.observation_dim = observation_dim
@@ -437,35 +445,60 @@ class Scalar(nn.Module):
 
 class ContinuousCQL:
     def __init__(
-        self,
-        critic_1,
-        critic_1_optimizer,
-        critic_2,
-        critic_2_optimizer,
-        actor,
-        actor_optimizer,
-        target_entropy: float,
-        discount: float = 0.99,
-        alpha_multiplier: float = 1.0,
-        use_automatic_entropy_tuning: bool = True,
-        backup_entropy: bool = False,
-        policy_lr: bool = 3e-4,
-        qf_lr: bool = 3e-4,
-        soft_target_update_rate: float = 5e-3,
-        bc_steps=100000,
-        target_update_period: int = 1,
-        cql_n_actions: int = 10,
-        cql_importance_sample: bool = True,
-        cql_lagrange: bool = False,
-        cql_target_action_gap: float = -1.0,
-        cql_temp: float = 1.0,
-        cql_alpha: float = 5.0,
-        cql_max_target_backup: bool = False,
-        cql_clip_diff_min: float = -np.inf,
-        cql_clip_diff_max: float = np.inf,
-        device: str = "cpu",
+            self,
+            config,
+            max_action: float,
+            state_dim: int,
+            action_dim: int,
+            target_entropy: float,
+            actor: nn.Module = None,
+            actor_optimizer: torch.optim.Optimizer = None,
+            critic_1: nn.Module = None,
+            critic_1_optimizer: torch.optim.Optimizer = None,
+            critic_2: nn.Module = None,
+            critic_2_optimizer: torch.optim.Optimizer = None,
+            discount: float = 0.99,
+            alpha_multiplier: float = 1.0,
+            use_automatic_entropy_tuning: bool = True,
+            backup_entropy: bool = False,
+            policy_lr: bool = 3e-4,
+            qf_lr: bool = 3e-4,
+            soft_target_update_rate: float = 5e-3,
+            bc_steps=100000,
+            target_update_period: int = 1,
+            cql_n_actions: int = 10,
+            cql_importance_sample: bool = True,
+            cql_lagrange: bool = False,
+            cql_target_action_gap: float = -1.0,
+            cql_temp: float = 1.0,
+            cql_alpha: float = 5.0,
+            cql_max_target_backup: bool = False,
+            cql_clip_diff_min: float = -np.inf,
+            cql_clip_diff_max: float = np.inf,
+            device: str = "cpu",
     ):
         super().__init__()
+        if actor is None:
+            critic_1 = FullyConnectedQFunction(
+                state_dim,
+                action_dim,
+                config.orthogonal_init,
+                config.q_n_hidden_layers,
+            ).to(config.device)
+            critic_2 = FullyConnectedQFunction(state_dim, action_dim, config.orthogonal_init).to(
+                config.device
+            )
+            critic_1_optimizer = torch.optim.Adam(list(critic_1.parameters()), config.qf_lr)
+            critic_2_optimizer = torch.optim.Adam(list(critic_2.parameters()), config.qf_lr)
+
+            actor = TanhGaussianPolicy(
+                state_dim,
+                action_dim,
+                max_action,
+                log_std_multiplier=config.policy_log_std_multiplier,
+                orthogonal_init=config.orthogonal_init,
+            ).to(config.device)
+            actor_optimizer = torch.optim.Adam(actor.parameters(), config.policy_lr)
 
         self.discount = discount
         self.target_entropy = target_entropy
@@ -526,7 +559,7 @@ class ContinuousCQL:
     def _alpha_and_alpha_loss(self, observations: torch.Tensor, log_pi: torch.Tensor):
         if self.use_automatic_entropy_tuning:
             alpha_loss = -(
-                self.log_alpha() * (log_pi + self.target_entropy).detach()
+                    self.log_alpha() * (log_pi + self.target_entropy).detach()
             ).mean()
             alpha = self.log_alpha().exp() * self.alpha_multiplier
         else:
@@ -535,12 +568,12 @@ class ContinuousCQL:
         return alpha, alpha_loss
 
     def _policy_loss(
-        self,
-        observations: torch.Tensor,
-        actions: torch.Tensor,
-        new_actions: torch.Tensor,
-        alpha: torch.Tensor,
-        log_pi: torch.Tensor,
+            self,
+            observations: torch.Tensor,
+            actions: torch.Tensor,
+            new_actions: torch.Tensor,
+            alpha: torch.Tensor,
+            log_pi: torch.Tensor,
     ) -> torch.Tensor:
         if self.total_it <= self.bc_steps:
             log_probs = self.actor.log_prob(observations, actions)
@@ -554,14 +587,14 @@ class ContinuousCQL:
         return policy_loss
 
     def _q_loss(
-        self,
-        observations: torch.Tensor,
-        actions: torch.Tensor,
-        next_observations: torch.Tensor,
-        rewards: torch.Tensor,
-        dones: torch.Tensor,
-        alpha: torch.Tensor,
-        log_dict: Dict,
+            self,
+            observations: torch.Tensor,
+            actions: torch.Tensor,
+            next_observations: torch.Tensor,
+            rewards: torch.Tensor,
+            dones: torch.Tensor,
+            alpha: torch.Tensor,
+            log_dict: Dict,
     ) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
         q1_predicted = self.critic_1(observations, actions)
         q2_predicted = self.critic_2(observations, actions)
@@ -646,7 +679,7 @@ class ContinuousCQL:
         cql_std_q2 = torch.std(cql_cat_q2, dim=1)
 
         if self.cql_importance_sample:
-            random_density = np.log(0.5**action_dim)
+            random_density = np.log(0.5 ** action_dim)
             cql_cat_q1 = torch.cat(
                 [
                     cql_q1_rand - random_density,
@@ -684,14 +717,14 @@ class ContinuousCQL:
                 torch.exp(self.log_alpha_prime()), min=0.0, max=1000000.0
             )
             cql_min_qf1_loss = (
-                alpha_prime
-                * self.cql_alpha
-                * (cql_qf1_diff - self.cql_target_action_gap)
+                    alpha_prime
+                    * self.cql_alpha
+                    * (cql_qf1_diff - self.cql_target_action_gap)
             )
             cql_min_qf2_loss = (
-                alpha_prime
-                * self.cql_alpha
-                * (cql_qf2_diff - self.cql_target_action_gap)
+                    alpha_prime
+                    * self.cql_alpha
+                    * (cql_qf2_diff - self.cql_target_action_gap)
             )
 
             self.alpha_prime_optimizer.zero_grad()
@@ -834,6 +867,55 @@ class ContinuousCQL:
         self.total_it = state_dict["total_it"]
 
 
+def dataset_info(dataset, config):
+    # 收集reward 信息
+    rewards = []
+    reward = 0
+    trajectorys = 0
+    lengths = []
+    length = 0
+    trajectory_lengths = []
+    trajectory_length = 0
+    for i in range(dataset["observations"].shape[0]):
+        if not dataset["terminals"][i]:
+            # wandb.log({"reward": dataset["rewards"][i]})
+            reward += dataset["rewards"][i]
+            length += 1
+            trajectory_length += 1
+        elif dataset["terminals"][i]:
+            reward += dataset["rewards"][i]
+            rewards.append(reward)
+            reward = 0
+            length += 1
+            lengths.append(length)
+            length = 0
+            trajectorys += 1
+            trajectory_lengths.append(trajectory_length)
+            trajectory_length = 0
+        else:
+            raise Exception
+    sub_datasets = []
+    num_agents = 10  # todo 把数据集分为10份
+    intervel = dataset["observations"].shape[0] // num_agents
+    # intervel = dataset["observations"].shape[0] // config.num_agents
+    config.intervel = intervel
+    for i in range(num_agents):
+        sub_dataset = {}
+        for key in dataset.keys():
+            sub_dataset[key] = dataset[key][(i) * intervel:(i + 1) * intervel]
+        sub_datasets.append(sub_dataset)
+    print('=' * 50)
+    print(f'{trajectorys} trajectories, {dataset["observations"].shape[0]} timesteps found')
+    print(f'Average return: {np.mean(rewards):.2f}, std: {np.std(rewards):.2f}')
+    try:
+        print(f'Max return: {np.max(rewards):.2f}, min: {np.min(rewards):.2f}')
+    except:
+        print(f'Max return: nan, min: nan')
+
+    print('=' * 50)
+    return sub_datasets
+
+
 @pyrallis.wrap()
 def train(config: TrainConfig):
     env = gym.make(config.env)
@@ -862,14 +944,13 @@ def train(config: TrainConfig):
     dataset["next_observations"] = normalize_states(
         dataset["next_observations"], state_mean, state_std
     )
+    wandb_init(asdict(config))
+    sub_dataset = dataset_info(dataset, config)
     env = wrap_env(env, state_mean=state_mean, state_std=state_std)
-    replay_buffer = ReplayBuffer(
-        state_dim,
-        action_dim,
-        config.buffer_size,
-        config.device,
-    )
-    replay_buffer.load_d4rl_dataset(dataset)
+    replay_buffer = [ReplayBuffer(state_dim, action_dim, config.buffer_size, config.device, ) for i in
+                     range(config.num_agents)]
+    for i in range(config.num_agents):
+        replay_buffer[i].load_d4rl_dataset(sub_dataset[i])
 
     max_action = float(env.action_space.high[0])
 
@@ -883,34 +964,38 @@ def train(config: TrainConfig):
     seed = config.seed
     set_seed(seed, env)
 
-    critic_1 = FullyConnectedQFunction(
-        state_dim,
-        action_dim,
-        config.orthogonal_init,
-        config.q_n_hidden_layers,
-    ).to(config.device)
-    critic_2 = FullyConnectedQFunction(state_dim, action_dim, config.orthogonal_init).to(
-        config.device
-    )
-    critic_1_optimizer = torch.optim.Adam(list(critic_1.parameters()), config.qf_lr)
-    critic_2_optimizer = torch.optim.Adam(list(critic_2.parameters()), config.qf_lr)
-
-    actor = TanhGaussianPolicy(
-        state_dim,
-        action_dim,
-        max_action,
-        log_std_multiplier=config.policy_log_std_multiplier,
-        orthogonal_init=config.orthogonal_init,
-    ).to(config.device)
-    actor_optimizer = torch.optim.Adam(actor.parameters(), config.policy_lr)
+    # critic_1 = FullyConnectedQFunction(
+    #     state_dim,
+    #     action_dim,
+    #     config.orthogonal_init,
+    #     config.q_n_hidden_layers,
+    # ).to(config.device)
+    # critic_2 = FullyConnectedQFunction(state_dim, action_dim, config.orthogonal_init).to(
+    #     config.device
+    # )
+    # critic_1_optimizer = torch.optim.Adam(list(critic_1.parameters()), config.qf_lr)
+    # critic_2_optimizer = torch.optim.Adam(list(critic_2.parameters()), config.qf_lr)
+    #
+    # actor = TanhGaussianPolicy(
+    #     state_dim,
+    #     action_dim,
+    #     max_action,
+    #     log_std_multiplier=config.policy_log_std_multiplier,
+    #     orthogonal_init=config.orthogonal_init,
+    # ).to(config.device)
+    # actor_optimizer = torch.optim.Adam(actor.parameters(), config.policy_lr)
 
     kwargs = {
-        "critic_1": critic_1,
-        "critic_2": critic_2,
-        "critic_1_optimizer": critic_1_optimizer,
-        "critic_2_optimizer": critic_2_optimizer,
-        "actor": actor,
-        "actor_optimizer": actor_optimizer,
+        "config": config,
+        "max_action": max_action,
+        "state_dim": state_dim,
+        "action_dim": action_dim,
+        # "critic_1": critic_1,
+        # "critic_2": critic_2,
+        # "critic_1_optimizer": critic_1_optimizer,
+        # "critic_2_optimizer": critic_2_optimizer,
+        # "actor": actor,
+        # "actor_optimizer": actor_optimizer,
         "discount": config.discount,
         "soft_target_update_rate": config.soft_target_update_rate,
         "device": config.device,
@@ -939,49 +1024,98 @@ def train(config: TrainConfig):
     print("---------------------------------------")
 
     # Initialize actor
-    trainer = ContinuousCQL(**kwargs)
+    trainer = [ContinuousCQL(**kwargs) for i in range(config.num_agents)]
 
     if config.load_model != "":
         policy_file = Path(config.load_model)
         trainer.load_state_dict(torch.load(policy_file))
         actor = trainer.actor
-
-    wandb_init(asdict(config))
+    # 首先把参数同步
+    network_name = ["actor", "critic_1", "target_critic_1", "critic_2", "target_critic_2"]
+    global_parameters_list = []
+    for i in range(len(network_name)):
+        global_parameters_list.append({})
+        for key, parameter in getattr(trainer[0], network_name[i]).state_dict().items():
+            global_parameters_list[i][key] = parameter.clone()
+    for i in range(config.num_agents - 1):
+        for j in range(len(network_name)):
+            getattr(trainer[i + 1], network_name[j]).load_state_dict(global_parameters_list[j])
 
     evaluations = []
-    for t in range(int(config.max_timesteps)):
-        batch = replay_buffer.sample(config.batch_size)
-        batch = [b.to(config.device) for b in batch]
-        log_dict = trainer.train(batch)
-        wandb.log(log_dict, step=trainer.total_it)
-        # Evaluate episode
-        if (t + 1) % config.eval_freq == 0:
-            print(f"Time steps: {t + 1}")
-            eval_scores = eval_actor(
-                env,
-                actor,
-                device=config.device,
-                n_episodes=config.n_episodes,
-                seed=config.seed,
-            )
-            eval_score = eval_scores.mean()
-            normalized_eval_score = env.get_normalized_score(eval_score) * 100.0
-            evaluations.append(normalized_eval_score)
-            print("---------------------------------------")
-            print(
-                f"Evaluation over {config.n_episodes} episodes: "
-                f"{eval_score:.3f} , D4RL score: {normalized_eval_score:.3f}"
-            )
-            print("---------------------------------------")
-            if config.checkpoints_path:
-                torch.save(
-                    trainer.state_dict(),
-                    os.path.join(config.checkpoints_path, f"checkpoint_{t}.pt"),
-                )
-            wandb.log(
-                {"d4rl_normalized_score": normalized_eval_score},
-                step=trainer.total_it,
-            )
+    trained_iterations = 0
+    while trained_iterations < config.max_timesteps:
+        for i in range(config.num_agents):
+            for t in trange(config.federated_node_iterations):
+                batch = replay_buffer[i].sample(config.batch_size)
+                batch = [b.to(config.device) for b in batch]
+                log_dict = trainer[i].train(batch)
+                if i == 0:
+                    wandb.log(log_dict, step=trainer[i].total_it)
+                    # Evaluate episode
+                    if (t + 1) % config.eval_freq == 0:
+                        print(f"Time steps: {t + 1}")
+                        eval_scores = eval_actor(
+                            env,
+                            trainer[i].actor,
+                            device=config.device,
+                            n_episodes=config.n_episodes,
+                            seed=config.seed,
+                        )
+                        eval_score = eval_scores.mean()
+                        normalized_eval_score = env.get_normalized_score(eval_score) * 100.0
+                        evaluations.append(normalized_eval_score)
+                        print("---------------------------------------")
+                        print(
+                            f"Evaluation over {config.n_episodes} episodes: "
+                            f"{eval_score:.3f} , D4RL score: {normalized_eval_score:.3f}"
+                        )
+                        print("---------------------------------------")
+
+                        if config.checkpoints_path is not None:
+                            torch.save(
+                                trainer[i].state_dict(),
+                                os.path.join(config.checkpoints_path, f"checkpoint_{t}.pt"),
+                            )
+
+                        wandb.log(
+                            {"d4rl_normalized_score": normalized_eval_score},
+                            step=trainer[i].total_it,
+                        )
+                    if (trained_iterations) % 1e6 == 0 and trained_iterations > 0:
+                        wandb.log({"data/eval_score": eval_score})
+                        wandb.log({"data/d4rl_normalized_score": normalized_eval_score})
+
+        trained_iterations += config.federated_node_iterations
+        # 参数聚合
+        global_parameters_list = []
+        for i in range(len(network_name)):
+            global_parameters_list.append({})
+            for key, parameter in getattr(trainer[0], network_name[i]).state_dict().items():
+                global_parameters_list[i][key] = parameter.clone()
+        for i in range(config.num_agents - 1):
+            for j in range(len(network_name)):
+                getattr(trainer[i + 1], network_name[j]).load_state_dict(global_parameters_list[j])
+
+        # 计算所有参数的总和
+        sum_parameters = []
+        for node_id in range(len(trainer)):  # FL 的不同节点
+            if len(sum_parameters) == 0:
+                for i in range(len(network_name)):
+                    network = getattr(trainer[node_id], network_name[i]).state_dict()
+                    sum_parameters.append(copy.deepcopy(network))
+            else:
+                for i in range(len(network_name)):  # 获取一个节点的不同网络
+                    network = getattr(trainer[node_id], network_name[i]).state_dict()
+                    for key in network.keys():  # 一个网络的不同层
+                        sum_parameters[i][key] += network[key]
+        # 计算平均值
+        for i in range(len(network_name)):  # 获取一个节点的不同网络
+            for key in sum_parameters[i].keys():  # 一个网络的不同层
+                sum_parameters[i][key] = sum_parameters[i][key] / config.num_agents
+        # 更新所有节点的参数
+        for node_id in range(len(trainer)):  # FL 的不同节点
+            for i in range(len(network_name)):
+                getattr(trainer[node_id], network_name[i]).load_state_dict(sum_parameters[i])
 
 
 if __name__ == "__main__":
