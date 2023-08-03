@@ -15,6 +15,8 @@ import pyrallis
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from tqdm import trange
+
 import wandb
 from torch.distributions import Normal
 from torch.optim.lr_scheduler import CosineAnnealingLR
@@ -30,7 +32,7 @@ LOG_STD_MAX = 2.0
 @dataclass
 class TrainConfig:
     # Experiment
-    device: str = "cuda"
+    device: str = "cuda:1"
     env: str = "halfcheetah-medium-expert-v2"  # OpenAI gym environment name
     seed: int = 0  # Sets Gym, PyTorch and Numpy seeds
     eval_freq: int = int(5e3)  # How often (time steps) we evaluate
@@ -53,14 +55,17 @@ class TrainConfig:
     actor_lr: float = 3e-4  # Actor learning rate
     actor_dropout: Optional[float] = None  # Adroit uses dropout for policy network
     # Wandb logging
-    project: str = "CORL"
-    group: str = "IQL-D4RL"
+    project: str = "paper2_iql"
+    # group: str = "IQL-D4RL"
     name: str = "IQL"
+    num_agents: int = 3
+    federated_node_iterations: int = 10000
 
     def __post_init__(self):
-        self.name = f"{self.name}-{self.env}-{str(uuid.uuid4())[:8]}"
+        self.name = f"{self.env}-seed{self.seed}-num_agents{self.num_agents}-{self.name}-{str(uuid.uuid4())[:8]}"
         if self.checkpoints_path is not None:
             self.checkpoints_path = os.path.join(self.checkpoints_path, self.name)
+os.environ["WANDB_API_KEY"] = "b4fdd4e5e894cba0eda9610de6f9f04b87a86453"
 
 
 def soft_update(target: nn.Module, source: nn.Module, tau: float):
@@ -179,9 +184,10 @@ def wandb_init(config: dict) -> None:
     wandb.init(
         config=config,
         project=config["project"],
-        group=config["group"],
+        group=config["env"],
         name=config["name"],
         id=str(uuid.uuid4()),
+        mode="disabled",
     )
     wandb.run.save()
 
@@ -374,13 +380,16 @@ class ValueFunction(nn.Module):
 class ImplicitQLearning:
     def __init__(
         self,
+        config,
+        state_dim: int,
+        action_dim: int,
         max_action: float,
-        actor: nn.Module,
-        actor_optimizer: torch.optim.Optimizer,
-        q_network: nn.Module,
-        q_optimizer: torch.optim.Optimizer,
-        v_network: nn.Module,
-        v_optimizer: torch.optim.Optimizer,
+        actor: nn.Module = None,
+        actor_optimizer: torch.optim.Optimizer = None,
+        q_network: nn.Module = None,
+        q_optimizer: torch.optim.Optimizer = None,
+        v_network: nn.Module = None,
+        v_optimizer: torch.optim.Optimizer = None,
         iql_tau: float = 0.7,
         beta: float = 3.0,
         max_steps: int = 1000000,
@@ -388,6 +397,22 @@ class ImplicitQLearning:
         tau: float = 0.005,
         device: str = "cpu",
     ):
+        if actor is None:
+            q_network = TwinQ(state_dim, action_dim).to(config.device)
+            v_network = ValueFunction(state_dim).to(config.device)
+            actor = (
+                DeterministicPolicy(
+                    state_dim, action_dim, max_action, dropout=config.actor_dropout
+                )
+                if config.iql_deterministic
+                else GaussianPolicy(
+                    state_dim, action_dim, max_action, dropout=config.actor_dropout
+                )
+            ).to(config.device)
+            v_optimizer = torch.optim.Adam(v_network.parameters(), lr=config.vf_lr)
+            q_optimizer = torch.optim.Adam(q_network.parameters(), lr=config.qf_lr)
+            actor_optimizer = torch.optim.Adam(actor.parameters(), lr=config.actor_lr)
+
         self.max_action = max_action
         self.qf = q_network
         self.q_target = copy.deepcopy(self.qf).requires_grad_(False).to(device)
@@ -512,6 +537,53 @@ class ImplicitQLearning:
         self.actor_lr_schedule.load_state_dict(state_dict["actor_lr_schedule"])
 
         self.total_it = state_dict["total_it"]
+def dataset_info(dataset, config):
+    # 收集reward 信息
+    rewards = []
+    reward = 0
+    trajectorys = 0
+    lengths = []
+    length = 0
+    trajectory_lengths = []
+    trajectory_length = 0
+    for i in range(dataset["observations"].shape[0]):
+        if not dataset["terminals"][i]:
+            # wandb.log({"reward": dataset["rewards"][i]})
+            reward += dataset["rewards"][i]
+            length += 1
+            trajectory_length += 1
+        elif dataset["terminals"][i]:
+            reward += dataset["rewards"][i]
+            rewards.append(reward)
+            reward = 0
+            length += 1
+            lengths.append(length)
+            length = 0
+            trajectorys += 1
+            trajectory_lengths.append(trajectory_length)
+            trajectory_length = 0
+        else:
+            raise Exception
+    sub_datasets = []
+    num_agents = 10  # todo 把数据集分为10份
+    intervel = dataset["observations"].shape[0] // num_agents
+    # intervel = dataset["observations"].shape[0] // config.num_agents
+    config.intervel = intervel
+    for i in range(num_agents):
+        sub_dataset = {}
+        for key in dataset.keys():
+            sub_dataset[key] = dataset[key][(i) * intervel:(i + 1) * intervel]
+        sub_datasets.append(sub_dataset)
+    print('=' * 50)
+    print(f'{trajectorys} trajectories, {dataset["observations"].shape[0]} timesteps found')
+    print(f'Average return: {np.mean(rewards):.2f}, std: {np.std(rewards):.2f}')
+    try:
+        print(f'Max return: {np.max(rewards):.2f}, min: {np.min(rewards):.2f}')
+    except:
+        print(f'Max return: nan, min: nan')
+
+    print('=' * 50)
+    return sub_datasets
 
 
 @pyrallis.wrap()
@@ -537,14 +609,13 @@ def train(config: TrainConfig):
     dataset["next_observations"] = normalize_states(
         dataset["next_observations"], state_mean, state_std
     )
+    wandb_init(asdict(config))
+    sub_dataset = dataset_info(dataset, config)
     env = wrap_env(env, state_mean=state_mean, state_std=state_std)
-    replay_buffer = ReplayBuffer(
-        state_dim,
-        action_dim,
-        config.buffer_size,
-        config.device,
-    )
-    replay_buffer.load_d4rl_dataset(dataset)
+    replay_buffer = [ReplayBuffer(state_dim, action_dim, config.buffer_size, config.device, ) for i in
+                     range(config.num_agents)]
+    for i in range(config.num_agents):
+        replay_buffer[i].load_d4rl_dataset(sub_dataset[i])
 
     max_action = float(env.action_space.high[0])
 
@@ -558,29 +629,32 @@ def train(config: TrainConfig):
     seed = config.seed
     set_seed(seed, env)
 
-    q_network = TwinQ(state_dim, action_dim).to(config.device)
-    v_network = ValueFunction(state_dim).to(config.device)
-    actor = (
-        DeterministicPolicy(
-            state_dim, action_dim, max_action, dropout=config.actor_dropout
-        )
-        if config.iql_deterministic
-        else GaussianPolicy(
-            state_dim, action_dim, max_action, dropout=config.actor_dropout
-        )
-    ).to(config.device)
-    v_optimizer = torch.optim.Adam(v_network.parameters(), lr=config.vf_lr)
-    q_optimizer = torch.optim.Adam(q_network.parameters(), lr=config.qf_lr)
-    actor_optimizer = torch.optim.Adam(actor.parameters(), lr=config.actor_lr)
+    # q_network = TwinQ(state_dim, action_dim).to(config.device)
+    # v_network = ValueFunction(state_dim).to(config.device)
+    # actor = (
+    #     DeterministicPolicy(
+    #         state_dim, action_dim, max_action, dropout=config.actor_dropout
+    #     )
+    #     if config.iql_deterministic
+    #     else GaussianPolicy(
+    #         state_dim, action_dim, max_action, dropout=config.actor_dropout
+    #     )
+    # ).to(config.device)
+    # v_optimizer = torch.optim.Adam(v_network.parameters(), lr=config.vf_lr)
+    # q_optimizer = torch.optim.Adam(q_network.parameters(), lr=config.qf_lr)
+    # actor_optimizer = torch.optim.Adam(actor.parameters(), lr=config.actor_lr)
 
     kwargs = {
+        "config": config,
         "max_action": max_action,
-        "actor": actor,
-        "actor_optimizer": actor_optimizer,
-        "q_network": q_network,
-        "q_optimizer": q_optimizer,
-        "v_network": v_network,
-        "v_optimizer": v_optimizer,
+        "state_dim": state_dim,
+        "action_dim": action_dim,
+        # "actor": actor,
+        # "actor_optimizer": actor_optimizer,
+        # "q_network": q_network,
+        # "q_optimizer": q_optimizer,
+        # "v_network": v_network,
+        # "v_optimizer": v_optimizer,
         "discount": config.discount,
         "tau": config.tau,
         "device": config.device,
@@ -595,48 +669,100 @@ def train(config: TrainConfig):
     print("---------------------------------------")
 
     # Initialize actor
-    trainer = ImplicitQLearning(**kwargs)
+    trainer = [ImplicitQLearning(**kwargs) for i in range(config.num_agents)]
 
     if config.load_model != "":
         policy_file = Path(config.load_model)
         trainer.load_state_dict(torch.load(policy_file))
         actor = trainer.actor
+    # 首先把参数同步
+    network_name = ["actor", "qf" , "q_target" , "vf" ] #,"critic_1", "target_critic_1", "critic_2", "target_critic_2"]
+    global_parameters_list = []
+    for i in range(len(network_name)):
+        global_parameters_list.append({})
+        for key, parameter in getattr(trainer[0], network_name[i]).state_dict().items():
+            global_parameters_list[i][key] = parameter.clone()
+    for i in range(config.num_agents - 1):
+        for j in range(len(network_name)):
+            getattr(trainer[i + 1], network_name[j]).load_state_dict(global_parameters_list[j])
 
-    wandb_init(asdict(config))
 
     evaluations = []
-    for t in range(int(config.max_timesteps)):
-        batch = replay_buffer.sample(config.batch_size)
-        batch = [b.to(config.device) for b in batch]
-        log_dict = trainer.train(batch)
-        wandb.log(log_dict, step=trainer.total_it)
-        # Evaluate episode
-        if (t + 1) % config.eval_freq == 0:
-            print(f"Time steps: {t + 1}")
-            eval_scores = eval_actor(
-                env,
-                actor,
-                device=config.device,
-                n_episodes=config.n_episodes,
-                seed=config.seed,
-            )
-            eval_score = eval_scores.mean()
-            normalized_eval_score = env.get_normalized_score(eval_score) * 100.0
-            evaluations.append(normalized_eval_score)
-            print("---------------------------------------")
-            print(
-                f"Evaluation over {config.n_episodes} episodes: "
-                f"{eval_score:.3f} , D4RL score: {normalized_eval_score:.3f}"
-            )
-            print("---------------------------------------")
-            if config.checkpoints_path is not None:
-                torch.save(
-                    trainer.state_dict(),
-                    os.path.join(config.checkpoints_path, f"checkpoint_{t}.pt"),
-                )
-            wandb.log(
-                {"d4rl_normalized_score": normalized_eval_score}, step=trainer.total_it
-            )
+    trained_iterations = 0
+    while trained_iterations < config.max_timesteps:
+        for i in range(config.num_agents):
+            for t in trange(config.federated_node_iterations):
+                batch = replay_buffer[i].sample(config.batch_size)
+                batch = [b.to(config.device) for b in batch]
+                log_dict = trainer[i].train(batch)
+                if i == 0:
+                    wandb.log(log_dict, step=trainer[i].total_it)
+                    # Evaluate episode
+                    if (t + 1) % config.eval_freq == 0:
+                        print(f"Time steps: {t + 1}")
+                        eval_scores = eval_actor(
+                            env,
+                            trainer[i].actor,
+                            device=config.device,
+                            n_episodes=config.n_episodes,
+                            seed=config.seed,
+                        )
+                        eval_score = eval_scores.mean()
+                        normalized_eval_score = env.get_normalized_score(eval_score) * 100.0
+                        evaluations.append(normalized_eval_score)
+                        print("---------------------------------------")
+                        print(
+                            f"Evaluation over {config.n_episodes} episodes: "
+                            f"{eval_score:.3f} , D4RL score: {normalized_eval_score:.3f}"
+                        )
+                        print("---------------------------------------")
+
+                        if config.checkpoints_path is not None:
+                            torch.save(
+                                trainer[i].state_dict(),
+                                os.path.join(config.checkpoints_path, f"checkpoint_{t}.pt"),
+                            )
+
+                        wandb.log(
+                            {"d4rl_normalized_score": normalized_eval_score},
+                            step=trainer[i].total_it,
+                        )
+                    if (trained_iterations) % 1e6 == 0 and trained_iterations > 0:
+                        wandb.log({"data/eval_score": eval_score})
+                        wandb.log({"data/d4rl_normalized_score": normalized_eval_score})
+
+        trained_iterations += config.federated_node_iterations
+        # 参数聚合
+        global_parameters_list = []
+        for i in range(len(network_name)):
+            global_parameters_list.append({})
+            for key, parameter in getattr(trainer[0], network_name[i]).state_dict().items():
+                global_parameters_list[i][key] = parameter.clone()
+        for i in range(config.num_agents - 1):
+            for j in range(len(network_name)):
+                getattr(trainer[i + 1], network_name[j]).load_state_dict(global_parameters_list[j])
+
+        # 计算所有参数的总和
+        sum_parameters = []
+        for node_id in range(len(trainer)):  # FL 的不同节点
+            if len(sum_parameters) == 0:
+                for i in range(len(network_name)):
+                    network = getattr(trainer[node_id], network_name[i]).state_dict()
+                    sum_parameters.append(copy.deepcopy(network))
+            else:
+                for i in range(len(network_name)):  # 获取一个节点的不同网络
+                    network = getattr(trainer[node_id], network_name[i]).state_dict()
+                    for key in network.keys():  # 一个网络的不同层
+                        sum_parameters[i][key] += network[key]
+        # 计算平均值
+        for i in range(len(network_name)):  # 获取一个节点的不同网络
+            for key in sum_parameters[i].keys():  # 一个网络的不同层
+                sum_parameters[i][key] = sum_parameters[i][key] / config.num_agents
+        # 更新所有节点的参数
+        for node_id in range(len(trainer)):  # FL 的不同节点
+            for i in range(len(network_name)):
+                getattr(trainer[node_id], network_name[i]).load_state_dict(sum_parameters[i])
+
 
 
 if __name__ == "__main__":
