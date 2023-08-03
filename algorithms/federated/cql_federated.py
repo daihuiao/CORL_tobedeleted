@@ -1081,20 +1081,20 @@ def train(config: TrainConfig):
                             {"d4rl_normalized_score": normalized_eval_score},
                             step=trainer[i].total_it,
                         )
-                    if (trained_iterations) % 1e6 == 0 and trained_iterations > 0:
+                    if (trained_iterations)  == 39e4 :
                         wandb.log({"data/eval_score": eval_score})
                         wandb.log({"data/d4rl_normalized_score": normalized_eval_score})
 
         trained_iterations += config.federated_node_iterations
-        # 参数聚合
-        global_parameters_list = []
-        for i in range(len(network_name)):
-            global_parameters_list.append({})
-            for key, parameter in getattr(trainer[0], network_name[i]).state_dict().items():
-                global_parameters_list[i][key] = parameter.clone()
-        for i in range(config.num_agents - 1):
-            for j in range(len(network_name)):
-                getattr(trainer[i + 1], network_name[j]).load_state_dict(global_parameters_list[j])
+        # # 参数聚合
+        # global_parameters_list = []
+        # for i in range(len(network_name)):
+        #     global_parameters_list.append({})
+        #     for key, parameter in getattr(trainer[0], network_name[i]).state_dict().items():
+        #         global_parameters_list[i][key] = parameter.clone()
+        # for i in range(config.num_agents - 1):
+        #     for j in range(len(network_name)):
+        #         getattr(trainer[i + 1], network_name[j]).load_state_dict(global_parameters_list[j])
 
         # 计算所有参数的总和
         sum_parameters = []

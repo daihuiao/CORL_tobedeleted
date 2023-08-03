@@ -35,7 +35,7 @@ class TrainConfig:
     device: str = "cuda:1"
     env: str = "halfcheetah-medium-expert-v2"  # OpenAI gym environment name
     seed: int = 0  # Sets Gym, PyTorch and Numpy seeds
-    eval_freq: int = int(5e3)  # How often (time steps) we evaluate
+    eval_freq: int = int(1e4)  # How often (time steps) we evaluate
     n_episodes: int = 10  # How many episodes run during evaluation
     max_timesteps: int = int(1e6)  # Max time steps to run environment
     checkpoints_path: Optional[str] = None  # Save path
@@ -187,7 +187,7 @@ def wandb_init(config: dict) -> None:
         group=config["env"],
         name=config["name"],
         id=str(uuid.uuid4()),
-        mode="disabled",
+        # mode="disabled",
     )
     wandb.run.save()
 
@@ -727,20 +727,20 @@ def train(config: TrainConfig):
                             {"d4rl_normalized_score": normalized_eval_score},
                             step=trainer[i].total_it,
                         )
-                    if (trained_iterations) % 1e6 == 0 and trained_iterations > 0:
+                    if (trained_iterations)  == 39e4 :
                         wandb.log({"data/eval_score": eval_score})
                         wandb.log({"data/d4rl_normalized_score": normalized_eval_score})
 
         trained_iterations += config.federated_node_iterations
-        # 参数聚合
-        global_parameters_list = []
-        for i in range(len(network_name)):
-            global_parameters_list.append({})
-            for key, parameter in getattr(trainer[0], network_name[i]).state_dict().items():
-                global_parameters_list[i][key] = parameter.clone()
-        for i in range(config.num_agents - 1):
-            for j in range(len(network_name)):
-                getattr(trainer[i + 1], network_name[j]).load_state_dict(global_parameters_list[j])
+        # # 参数聚合
+        # global_parameters_list = []
+        # for i in range(len(network_name)):
+        #     global_parameters_list.append({})
+        #     for key, parameter in getattr(trainer[0], network_name[i]).state_dict().items():
+        #         global_parameters_list[i][key] = parameter.clone()
+        # for i in range(config.num_agents - 1):
+        #     for j in range(len(network_name)):
+        #         getattr(trainer[i + 1], network_name[j]).load_state_dict(global_parameters_list[j])
 
         # 计算所有参数的总和
         sum_parameters = []
