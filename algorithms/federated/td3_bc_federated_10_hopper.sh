@@ -1,4 +1,4 @@
-for seed in 0 2 #seed
+for seed in 0  #seed
 do
   for env_name in "halfcheetah-medium-replay-v2" # "halfcheetah-medium-expert-v2"  "halfcheetah-medium-v2" # "halfcheetah-expert-v2" #env_name
   do
@@ -11,7 +11,7 @@ done
 
 for seed in 0 1 2 #seed
 do
-  for env_name in "hopper-medium-replay-v2"  "walker2d-medium-replay-v2" # "halfcheetah-medium-expert-v2"  "halfcheetah-medium-v2" # "halfcheetah-expert-v2" #env_name
+  for env_name in "hopper-medium-replay-v2"  # "halfcheetah-medium-expert-v2"  "halfcheetah-medium-v2" # "halfcheetah-expert-v2" #env_name
   do
     for num_agents in  10 #num_agents
     do
