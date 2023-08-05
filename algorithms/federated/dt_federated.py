@@ -1,6 +1,10 @@
 # inspiration:
+
 # 1. https://github.com/kzl/decision-transformer/blob/master/gym/decision_transformer/models/decision_transformer.py  # noqa
+
 # 2. https://github.com/karpathy/minGPT
+
+import copy
 import os
 import random
 import uuid
@@ -18,13 +22,19 @@ import wandb
 from torch.nn import functional as F
 from torch.utils.data import DataLoader, IterableDataset
 from tqdm.auto import tqdm, trange  # noqa
+from tqdm import trange
+
+TensorBatch = List[torch.Tensor]
+
 
 @dataclass
 class TrainConfig:
     # wandb params
-    project: str = "CORL"
-    group: str = "DT-D4RL"
+    project: str = "paper2_DT"
+    # group: str = "DT-D4RL"
     name: str = "DT"
+    num_agents: int = 1
+    federated_node_iterations: int = 10000
     # model params
     embedding_dim: int = 128
     num_layers: int = 3
@@ -36,36 +46,39 @@ class TrainConfig:
     embedding_dropout: float = 0.1
     max_action: float = 1.0
     # training params
-    env_name: str = "halfcheetah-medium-v2"
+    env: str = "halfcheetah-medium-v2"
     learning_rate: float = 1e-4
     betas: Tuple[float, float] = (0.9, 0.999)
     weight_decay: float = 1e-4
     clip_grad: Optional[float] = 0.25
     batch_size: int = 64
-    update_steps: int = 100_000
+    max_timesteps: int = 0.4e6
     warmup_steps: int = 10_000
     reward_scale: float = 0.001
     num_workers: int = 4
     # evaluation params
     target_returns: Tuple[float, ...] = (12000.0, 6000.0)
-    eval_episodes: int = 100
+    eval_episodes: int = 10
     eval_every: int = 10_000
     # general params
     checkpoints_path: Optional[str] = None
     deterministic_torch: bool = False
-    train_seed: int = 10
-    eval_seed: int = 42
+    seed: int = 10
     device: str = "cuda"
 
     def __post_init__(self):
-        self.name = f"{self.name}-{self.env_name}-{str(uuid.uuid4())[:8]}"
+        self.name = f"{self.env}-seed{self.seed}-num_agents{self.num_agents}-{self.name}-{str(uuid.uuid4())[:8]}"
         if self.checkpoints_path is not None:
             self.checkpoints_path = os.path.join(self.checkpoints_path, self.name)
 
 
+os.environ["WANDB_API_KEY"] = "b4fdd4e5e894cba0eda9610de6f9f04b87a86453"
+
+
 # general utils
+
 def set_seed(
-    seed: int, env: Optional[gym.Env] = None, deterministic_torch: bool = False
+        seed: int, env: Optional[gym.Env] = None, deterministic_torch: bool = False
 ):
     if env is not None:
         env.seed(seed)
@@ -81,18 +94,19 @@ def wandb_init(config: dict) -> None:
     wandb.init(
         config=config,
         project=config["project"],
-        group=config["group"],
+        group=config["env"],
         name=config["name"],
         id=str(uuid.uuid4()),
+        # mode="disabled"
     )
     wandb.run.save()
 
 
 def wrap_env(
-    env: gym.Env,
-    state_mean: Union[np.ndarray, float] = 0.0,
-    state_std: Union[np.ndarray, float] = 1.0,
-    reward_scale: float = 1.0,
+        env: gym.Env,
+        state_mean: Union[np.ndarray, float] = 0.0,
+        state_std: Union[np.ndarray, float] = 1.0,
+        reward_scale: float = 1.0,
 ) -> gym.Env:
     def normalize_state(state):
         return (state - state_mean) / state_std
@@ -107,8 +121,9 @@ def wrap_env(
 
 
 # some utils functionalities specific for Decision Transformer
+
 def pad_along_axis(
-    arr: np.ndarray, pad_to: int, axis: int = 0, fill_value: float = 0.0
+        arr: np.ndarray, pad_to: int, axis: int = 0, fill_value: float = 0.0
 ) -> np.ndarray:
     pad_size = pad_to - arr.shape[axis]
     if pad_size <= 0:
@@ -128,9 +143,9 @@ def discounted_cumsum(x: np.ndarray, gamma: float) -> np.ndarray:
 
 
 def load_d4rl_trajectories(
-    env_name: str, gamma: float = 1.0
+        env: str, gamma: float = 1.0
 ) -> Tuple[List[DefaultDict[str, np.ndarray]], Dict[str, Any]]:
-    dataset = gym.make(env_name).get_dataset()
+    dataset = gym.make(env).get_dataset()
     traj, traj_len = [], []
 
     data_ = defaultdict(list)
@@ -160,22 +175,22 @@ def load_d4rl_trajectories(
 
 
 class SequenceDataset(IterableDataset):
-    def __init__(self, env_name: str, seq_len: int = 10, reward_scale: float = 1.0):
-        self.dataset, info = load_d4rl_trajectories(env_name, gamma=1.0)
+    def __init__(self, sub_dataset, info, seq_len: int = 10, reward_scale: float = 1.0):
+        self.dataset = sub_dataset
         self.reward_scale = reward_scale
         self.seq_len = seq_len
 
         self.state_mean = info["obs_mean"]
         self.state_std = info["obs_std"]
         # https://github.com/kzl/decision-transformer/blob/e2d82e68f330c00f763507b3b01d774740bee53f/gym/experiment.py#L116 # noqa
-        self.sample_prob = info["traj_lens"] / info["traj_lens"].sum()
+        self.sample_prob = info["traj_lens"][0:100] / (info["traj_lens"].sum()/10)
 
     def __prepare_sample(self, traj_idx, start_idx):
         traj = self.dataset[traj_idx]
         # https://github.com/kzl/decision-transformer/blob/e2d82e68f330c00f763507b3b01d774740bee53f/gym/experiment.py#L128 # noqa
-        states = traj["observations"][start_idx : start_idx + self.seq_len]
-        actions = traj["actions"][start_idx : start_idx + self.seq_len]
-        returns = traj["returns"][start_idx : start_idx + self.seq_len]
+        states = traj["observations"][start_idx: start_idx + self.seq_len]
+        actions = traj["actions"][start_idx: start_idx + self.seq_len]
+        returns = traj["returns"][start_idx: start_idx + self.seq_len]
         time_steps = np.arange(start_idx, start_idx + self.seq_len)
 
         states = (states - self.state_mean) / self.state_std
@@ -199,14 +214,15 @@ class SequenceDataset(IterableDataset):
 
 
 # Decision Transformer implementation
+
 class TransformerBlock(nn.Module):
     def __init__(
-        self,
-        seq_len: int,
-        embedding_dim: int,
-        num_heads: int,
-        attention_dropout: float,
-        residual_dropout: float,
+            self,
+            seq_len: int,
+            embedding_dim: int,
+            num_heads: int,
+            attention_dropout: float,
+            residual_dropout: float,
     ):
         super().__init__()
         self.norm1 = nn.LayerNorm(embedding_dim)
@@ -230,7 +246,7 @@ class TransformerBlock(nn.Module):
 
     # [batch_size, seq_len, emb_dim] -> [batch_size, seq_len, emb_dim]
     def forward(
-        self, x: torch.Tensor, padding_mask: Optional[torch.Tensor] = None
+            self, x: torch.Tensor, padding_mask: Optional[torch.Tensor] = None
     ) -> torch.Tensor:
         causal_mask = self.causal_mask[: x.shape[1], : x.shape[1]]
 
@@ -253,18 +269,18 @@ class TransformerBlock(nn.Module):
 
 class DecisionTransformer(nn.Module):
     def __init__(
-        self,
-        state_dim: int,
-        action_dim: int,
-        seq_len: int = 10,
-        episode_len: int = 1000,
-        embedding_dim: int = 128,
-        num_layers: int = 4,
-        num_heads: int = 8,
-        attention_dropout: float = 0.0,
-        residual_dropout: float = 0.0,
-        embedding_dropout: float = 0.0,
-        max_action: float = 1.0,
+            self,
+            state_dim: int,
+            action_dim: int,
+            seq_len: int = 10,
+            episode_len: int = 1000,
+            embedding_dim: int = 128,
+            num_layers: int = 4,
+            num_heads: int = 8,
+            attention_dropout: float = 0.0,
+            residual_dropout: float = 0.0,
+            embedding_dropout: float = 0.0,
+            max_action: float = 1.0,
     ):
         super().__init__()
         self.emb_drop = nn.Dropout(embedding_dropout)
@@ -310,12 +326,12 @@ class DecisionTransformer(nn.Module):
             torch.nn.init.ones_(module.weight)
 
     def forward(
-        self,
-        states: torch.Tensor,  # [batch_size, seq_len, state_dim]
-        actions: torch.Tensor,  # [batch_size, seq_len, action_dim]
-        returns_to_go: torch.Tensor,  # [batch_size, seq_len]
-        time_steps: torch.Tensor,  # [batch_size, seq_len]
-        padding_mask: Optional[torch.Tensor] = None,  # [batch_size, seq_len]
+            self,
+            states: torch.Tensor,  # [batch_size, seq_len, state_dim]
+            actions: torch.Tensor,  # [batch_size, seq_len, action_dim]
+            returns_to_go: torch.Tensor,  # [batch_size, seq_len]
+            time_steps: torch.Tensor,  # [batch_size, seq_len]
+            padding_mask: Optional[torch.Tensor] = None,  # [batch_size, seq_len]
     ) -> torch.FloatTensor:
         batch_size, seq_len = states.shape[0], states.shape[1]
         # [batch_size, seq_len, emb_dim]
@@ -353,12 +369,13 @@ class DecisionTransformer(nn.Module):
 
 
 # Training and evaluation logic
+
 @torch.no_grad()
 def eval_rollout(
-    model: DecisionTransformer,
-    env: gym.Env,
-    target_return: float,
-    device: str = "cpu",
+        model: DecisionTransformer,
+        env: gym.Env,
+        target_return: float,
+        device: str = "cpu",
 ) -> Tuple[float, float]:
     states = torch.zeros(
         1, model.episode_len + 1, model.state_dim, dtype=torch.float, device=device
@@ -380,10 +397,10 @@ def eval_rollout(
         # step + 1 as : operator is not inclusive, last action is dummy with zeros
         # (as model will predict last, actual last values are not important)
         predicted_actions = model(  # fix this noqa!!!
-            states[:, : step + 1][:, -model.seq_len :],
-            actions[:, : step + 1][:, -model.seq_len :],
-            returns[:, : step + 1][:, -model.seq_len :],
-            time_steps[:, : step + 1][:, -model.seq_len :],
+            states[:, : step + 1][:, -model.seq_len:],
+            actions[:, : step + 1][:, -model.seq_len:],
+            returns[:, : step + 1][:, -model.seq_len:],
+            time_steps[:, : step + 1][:, -model.seq_len:],
         )
         predicted_action = predicted_actions[0, -1].cpu().numpy()
         next_state, reward, done, info = env.step(predicted_action)
@@ -401,72 +418,38 @@ def eval_rollout(
     return episode_return, episode_len
 
 
-@pyrallis.wrap()
-def train(config: TrainConfig):
-    set_seed(config.train_seed, deterministic_torch=config.deterministic_torch)
-    # init wandb session for logging
-    wandb_init(asdict(config))
+class Decision_trainer:
+    def __init__(self, config):
+        self.config = config
+        self.model = DecisionTransformer(
+            state_dim=config.state_dim,
+            action_dim=config.action_dim,
+            embedding_dim=config.embedding_dim,
+            seq_len=config.seq_len,
+            episode_len=config.episode_len,
+            num_layers=config.num_layers,
+            num_heads=config.num_heads,
+            attention_dropout=config.attention_dropout,
+            residual_dropout=config.residual_dropout,
+            embedding_dropout=config.embedding_dropout,
+            max_action=config.max_action,
+        ).to(config.device)
+        self.optim = torch.optim.AdamW(
+            self.model.parameters(),
+            lr=config.learning_rate,
+            weight_decay=config.weight_decay,
+            betas=config.betas,
+        )
+        self.scheduler = torch.optim.lr_scheduler.LambdaLR(
+            self.optim,
+            lambda steps: min((steps + 1) / config.warmup_steps, 1),
+        )
 
-    # data & dataloader setup
-    dataset = SequenceDataset(
-        config.env_name, seq_len=config.seq_len, reward_scale=config.reward_scale
-    )
-    trainloader = DataLoader(
-        dataset,
-        batch_size=config.batch_size,
-        pin_memory=True,
-        num_workers=config.num_workers,
-    )
-    # evaluation environment with state & reward preprocessing (as in dataset above)
-    eval_env = wrap_env(
-        env=gym.make(config.env_name),
-        state_mean=dataset.state_mean,
-        state_std=dataset.state_std,
-        reward_scale=config.reward_scale,
-    )
-    # model & optimizer & scheduler setup
-    config.state_dim = eval_env.observation_space.shape[0]
-    config.action_dim = eval_env.action_space.shape[0]
-    model = DecisionTransformer(
-        state_dim=config.state_dim,
-        action_dim=config.action_dim,
-        embedding_dim=config.embedding_dim,
-        seq_len=config.seq_len,
-        episode_len=config.episode_len,
-        num_layers=config.num_layers,
-        num_heads=config.num_heads,
-        attention_dropout=config.attention_dropout,
-        residual_dropout=config.residual_dropout,
-        embedding_dropout=config.embedding_dropout,
-        max_action=config.max_action,
-    ).to(config.device)
-
-    optim = torch.optim.AdamW(
-        model.parameters(),
-        lr=config.learning_rate,
-        weight_decay=config.weight_decay,
-        betas=config.betas,
-    )
-    scheduler = torch.optim.lr_scheduler.LambdaLR(
-        optim,
-        lambda steps: min((steps + 1) / config.warmup_steps, 1),
-    )
-    # save config to the checkpoint
-    if config.checkpoints_path is not None:
-        print(f"Checkpoints path: {config.checkpoints_path}")
-        os.makedirs(config.checkpoints_path, exist_ok=True)
-        with open(os.path.join(config.checkpoints_path, "config.yaml"), "w") as f:
-            pyrallis.dump(config, f)
-
-    print(f"Total parameters: {sum(p.numel() for p in model.parameters())}")
-    trainloader_iter = iter(trainloader)
-    for step in trange(config.update_steps, desc="Training"):
-        batch = next(trainloader_iter)
-        states, actions, returns, time_steps, mask = [b.to(config.device) for b in batch]
+    def train(self, batch: TensorBatch):
+        states, actions, returns, time_steps, mask = [b.to(self.config.device) for b in batch]
         # True value indicates that the corresponding key value will be ignored
         padding_mask = ~mask.to(torch.bool)
-
-        predicted_actions = model(
+        predicted_actions = self.model(
             states=states,
             actions=actions,
             returns_to_go=returns,
@@ -477,63 +460,143 @@ def train(config: TrainConfig):
         # [batch_size, seq_len, action_dim] * [batch_size, seq_len, 1]
         loss = (loss * mask.unsqueeze(-1)).mean()
 
-        optim.zero_grad()
+        self.optim.zero_grad()
         loss.backward()
-        if config.clip_grad is not None:
-            torch.nn.utils.clip_grad_norm_(model.parameters(), config.clip_grad)
-        optim.step()
-        scheduler.step()
+        if self.config.clip_grad is not None:
+            torch.nn.utils.clip_grad_norm_(self.model.parameters(), self.config.clip_grad)
+        self.optim.step()
+        self.scheduler.step()
+        return loss.item(), self.scheduler.get_last_lr()[0]
 
-        wandb.log(
-            {
-                "train_loss": loss.item(),
-                "learning_rate": scheduler.get_last_lr()[0],
-            },
-            step=step,
-        )
+
+def dataset_info(config):
+    dataset, info = load_d4rl_trajectories(config.env, gamma=1.0)
+    sub_datasets = []
+    num_agents = 10  # todo 把数据集分为10份
+    intervel = len(dataset) // num_agents
+    config.intervel = intervel
+    for i in range(num_agents):
+        sub_datasets.append(dataset[(i) * intervel:(i + 1) * intervel])
+    return sub_datasets, info
+
+
+@pyrallis.wrap()
+def train(config: TrainConfig):
+    set_seed(config.seed, deterministic_torch=config.deterministic_torch)
+    # init wandb session for logging
+    wandb_init(asdict(config))
+
+    # data & dataloader setup
+    sub_dataset, info = dataset_info(config)
+
+    datasets = [SequenceDataset(sub_dataset[i], info, seq_len=config.seq_len, reward_scale=config.reward_scale) for i in
+                range(config.num_agents)]
+    trainloaders = [
+        DataLoader(datasets[i], batch_size=config.batch_size, pin_memory=True, num_workers=config.num_workers, ) for i
+        in range(config.num_agents)]
+    # evaluation environment with state & reward preprocessing (as in dataset above)
+    eval_env = wrap_env(
+        env=gym.make(config.env),
+        state_mean=datasets[0].state_mean,
+        state_std=datasets[0].state_std,
+        reward_scale=config.reward_scale,
+    )
+    # model & optimizer & scheduler setup
+    config.state_dim = eval_env.observation_space.shape[0]
+    config.action_dim = eval_env.action_space.shape[0]
+    trainer = [Decision_trainer(config) for i in range(config.num_agents)]
+    # save config to the checkpoint
+    if config.checkpoints_path is not None:
+        print(f"Checkpoints path: {config.checkpoints_path}")
+        os.makedirs(config.checkpoints_path, exist_ok=True)
+        with open(os.path.join(config.checkpoints_path, "config.yaml"), "w") as f:
+            pyrallis.dump(config, f)
+
+    print(f"Total parameters: {sum(p.numel() for p in trainer[0].model.parameters())}")
+    # 首先把参数同步
+    network_name = ["model"]
+    global_parameters_list = []
+    for i in range(len(network_name)):
+        global_parameters_list.append({})
+        for key, parameter in getattr(trainer[0], network_name[i]).state_dict().items():
+            global_parameters_list[i][key] = parameter.clone()
+    for i in range(config.num_agents - 1):
+        for j in range(len(network_name)):
+            getattr(trainer[i + 1], network_name[j]).load_state_dict(global_parameters_list[j])
+
+    evaluations = []
+    trained_iterations = 0
+    while trained_iterations < config.max_timesteps:
+        for i in range(config.num_agents):
+            trainloader_iter = iter(trainloaders[i])
+            for t in range(config.federated_node_iterations):
+                batch = next(trainloader_iter)
+                loss, lr = trainer[i].train(batch)
+                if i == 0:
+                    wandb.log({"train_loss": loss, "learning_rate": lr, }, step=t + trained_iterations, )
+        # 计算所有参数的总和
+        sum_parameters = []
+        for node_id in range(len(trainer)):  # FL 的不同节点
+            if len(sum_parameters) == 0:
+                for i in range(len(network_name)):
+                    network = getattr(trainer[node_id], network_name[i]).state_dict()
+                    sum_parameters.append(copy.deepcopy(network))
+            else:
+                for i in range(len(network_name)):  # 获取一个节点的不同网络
+                    network = getattr(trainer[node_id], network_name[i]).state_dict()
+                    for key in network.keys():  # 一个网络的不同层
+                        sum_parameters[i][key] += network[key]
+        # 计算平均值
+        for i in range(len(network_name)):  # 获取一个节点的不同网络
+            for key in sum_parameters[i].keys():  # 一个网络的不同层
+                sum_parameters[i][key] = sum_parameters[i][key] / config.num_agents
+        # 更新所有节点的参数
+        for node_id in range(len(trainer)):  # FL 的不同节点
+            for i in range(len(network_name)):
+                getattr(trainer[node_id], network_name[i]).load_state_dict(sum_parameters[i])
 
         # validation in the env for the actual online performance
-        if step % config.eval_every == 0 or step == config.update_steps - 1:
-            model.eval()
-            for target_return in config.target_returns:
-                eval_env.seed(config.eval_seed)
-                eval_returns = []
-                for _ in trange(config.eval_episodes, desc="Evaluation", leave=False):
-                    eval_return, eval_len = eval_rollout(
-                        model=model,
-                        env=eval_env,
-                        target_return=target_return * config.reward_scale,
-                        device=config.device,
-                    )
-                    # unscale for logging & correct normalized score computation
-                    eval_returns.append(eval_return / config.reward_scale)
 
-                normalized_scores = (
-                    eval_env.get_normalized_score(np.array(eval_returns)) * 100
+        trainer[0].model.eval()
+        for target_return in config.target_returns:
+            eval_env.seed(config.seed)
+            eval_returns = []
+            for _ in trange(config.eval_episodes, desc="Evaluation", leave=False):
+                eval_return, eval_len = eval_rollout(
+                    model=trainer[0].model,
+                    env=eval_env,
+                    target_return=target_return * config.reward_scale,
+                    device=config.device,
                 )
-                wandb.log(
-                    {
-                        f"eval/{target_return}_return_mean": np.mean(eval_returns),
-                        f"eval/{target_return}_return_std": np.std(eval_returns),
-                        f"eval/{target_return}_normalized_score_mean": np.mean(
-                            normalized_scores
-                        ),
-                        f"eval/{target_return}_normalized_score_std": np.std(
-                            normalized_scores
-                        ),
-                    },
-                    step=step,
-                )
-            model.train()
+                # unscale for logging & correct normalized score computation
+                eval_returns.append(eval_return / config.reward_scale)
 
-    if config.checkpoints_path is not None:
-        checkpoint = {
-            "model_state": model.state_dict(),
-            "state_mean": dataset.state_mean,
-            "state_std": dataset.state_std,
-        }
-        torch.save(checkpoint, os.path.join(config.checkpoints_path, "dt_checkpoint.pt"))
+            normalized_scores = (
+                eval_env.get_normalized_score(np.array(eval_returns)) * 100
+            )
+            wandb.log(
+                {
+                    f"eval/{target_return}_return_mean": np.mean(eval_returns),
+                    f"eval/{target_return}_return_std": np.std(eval_returns),
+                    f"eval/{target_return}_normalized_score_mean": np.mean(
+                        normalized_scores
+                    ),
+                    f"eval/{target_return}_normalized_score_std": np.std(
+                        normalized_scores
+                    ),
+                },
+                step=trained_iterations,
+            )
+        for i in range(config.num_agents):
+            trainer[i].model.train()
 
+        if config.checkpoints_path is not None:
+            checkpoint = {
+                "model_state": trainer[0].model.state_dict(),
+                "state_mean": datasets[0].state_mean,
+                "state_std": datasets[0].state_std,
+            }
+            torch.save(checkpoint, os.path.join(config.checkpoints_path, "dt_checkpoint.pt"))
 
 if __name__ == "__main__":
     train()
