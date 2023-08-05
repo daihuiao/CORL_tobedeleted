@@ -46,7 +46,7 @@ class TrainConfig:
     embedding_dropout: float = 0.1
     max_action: float = 1.0
     # training params
-    env: str = "halfcheetah-medium-v2"
+    env: str = "halfcheetah-medium-replay-v2"
     learning_rate: float = 1e-4
     betas: Tuple[float, float] = (0.9, 0.999)
     weight_decay: float = 1e-4
@@ -208,7 +208,7 @@ class SequenceDataset(IterableDataset):
 
     def __iter__(self):
         while True:
-            traj_idx = np.random.choice(len(self.dataset), p=self.sample_prob)
+            traj_idx = np.random.choice(len(self.dataset))
             start_idx = random.randint(0, self.dataset[traj_idx]["rewards"].shape[0] - 1)
             yield self.__prepare_sample(traj_idx, start_idx)
 

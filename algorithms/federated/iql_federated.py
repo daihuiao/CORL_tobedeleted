@@ -33,7 +33,7 @@ LOG_STD_MAX = 2.0
 class TrainConfig:
     # Experiment
     device: str = "cuda:1"
-    env: str = "halfcheetah-medium-expert-v2"  # OpenAI gym environment name
+    env: str = "halfcheetah-medium-replay-v2"  # OpenAI gym environment name
     seed: int = 0  # Sets Gym, PyTorch and Numpy seeds
     eval_freq: int = int(1e4)  # How often (time steps) we evaluate
     n_episodes: int = 10  # How many episodes run during evaluation
