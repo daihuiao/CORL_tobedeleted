@@ -97,7 +97,7 @@ def wandb_init(config: dict) -> None:
         group=config["env"],
         name=config["name"],
         id=str(uuid.uuid4()),
-        # mode="disabled"
+        mode="disabled"
     )
     wandb.run.save()
 
@@ -529,7 +529,7 @@ def train(config: TrainConfig):
     while trained_iterations < config.max_timesteps:
         for i in range(config.num_agents):
             trainloader_iter = iter(trainloaders[i])
-            for t in range(config.federated_node_iterations):
+            for t in trange(config.federated_node_iterations):
                 batch = next(trainloader_iter)
                 loss, lr = trainer[i].train(batch)
                 if i == 0:
