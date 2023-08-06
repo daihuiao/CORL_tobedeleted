@@ -534,6 +534,8 @@ def train(config: TrainConfig):
                 loss, lr = trainer[i].train(batch)
                 if i == 0:
                     wandb.log({"train_loss": loss, "learning_rate": lr, }, step=t + trained_iterations, )
+
+        trained_iterations += config.federated_node_iterations
         # 计算所有参数的总和
         sum_parameters = []
         for node_id in range(len(trainer)):  # FL 的不同节点
