@@ -574,6 +574,9 @@ def train(config: TrainConfig):
             normalized_scores = (
                 eval_env.get_normalized_score(np.array(eval_returns)) * 100
             )
+            print("total_iterations", trained_iterations)
+            print(f"eval/{target_return}_return_mean", np.mean(eval_returns),
+                  f"eval/{target_return}_normalized_score_mean", np.mean(normalized_scores),)
             wandb.log(
                 {
                     f"eval/{target_return}_return_mean": np.mean(eval_returns),
