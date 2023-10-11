@@ -33,7 +33,8 @@ class TrainConfig:
     eval_seed: int = 0  # Eval environment seed
     eval_freq: int = int(5e3)  # How often (time steps) we evaluate
     n_episodes: int = 10  # How many episodes run during evaluation
-    offline_iterations: int = int(1e6)  # Number of offline updates
+    # offline_iterations: int = int(1e6)  # Number of offline updates
+    offline_iterations: int = int(1)  # Number of offline updates
     online_iterations: int = int(1e6)  # Number of online updates
     checkpoints_path: Optional[str] = None  # Save path
     load_model: str = ""  # Model load file name, "" doesn't load
@@ -212,6 +213,7 @@ def wandb_init(config: dict) -> None:
         group=config["group"],
         name=config["name"],
         id=str(uuid.uuid4()),
+        mode="disabled",
     )
     wandb.run.save()
 

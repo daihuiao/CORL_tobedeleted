@@ -28,7 +28,7 @@ TensorBatch = List[torch.Tensor]
 class TrainConfig:
     # Experiment
     device: str = "cuda:1"
-    env: str = "halfcheetah-medium-expert-v2"  # OpenAI gym environment name
+    env: str = "kitchen-partial-v0"  # OpenAI gym environment name
     seed: int = 0  # Sets Gym, PyTorch and Numpy seeds
     eval_freq: int = int(1e4)  # How often (time steps) we evaluate
     n_episodes: int = 10  # How many episodes run during evaluation
@@ -70,7 +70,7 @@ class TrainConfig:
     policy_log_std_multiplier: float = 1.0
 
     # Wandb logging
-    project: str = "paper2_cql"
+    project: str = "paper2_cql_"
     # group: str = "CQL-D4RL"
     name: str = "CQL"
     num_agents: int = 3

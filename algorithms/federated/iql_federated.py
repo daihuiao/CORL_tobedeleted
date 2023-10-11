@@ -55,7 +55,7 @@ class TrainConfig:
     actor_lr: float = 3e-4  # Actor learning rate
     actor_dropout: Optional[float] = None  # Adroit uses dropout for policy network
     # Wandb logging
-    project: str = "paper2_iql"
+    project: str = "paper2_iql_"
     # group: str = "IQL-D4RL"
     name: str = "IQL"
     num_agents: int = 3

@@ -97,7 +97,7 @@ def wandb_init(config: dict) -> None:
         group=config["env"],
         name=config["name"],
         id=str(uuid.uuid4()),
-        mode="disabled"
+        # mode="disabled"
     )
     wandb.run.save()
 

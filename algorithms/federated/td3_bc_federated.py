@@ -48,7 +48,7 @@ class TrainConfig:
     normalize: bool = True  # Normalize states
     normalize_reward: bool = False  # Normalize reward
     # Wandb logging
-    project: str = "paper2_td3_bc"
+    project: str = "paper2_td3_bc_"
     # group: str = "TD3_BC-D4RL"
     name: str = "TD3_BC"
     num_agents: int = 3
