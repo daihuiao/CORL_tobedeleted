@@ -5,7 +5,7 @@ do
   do
     for num_agents in  10 #num_agents
     do
-      python3 cql_federated.py --env $env_name --seed $seed --num_agents $num_agents --device "cuda:0"
+      python3 cql_federated.py --env $env_name --seed $seed --num_agents $num_agents --device "cuda:1"
     done
   done
 done
