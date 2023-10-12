@@ -52,7 +52,7 @@ class TrainConfig:
     weight_decay: float = 1e-4
     clip_grad: Optional[float] = 0.25
     batch_size: int = 64
-    max_timesteps: int = 0.4e6
+    max_timesteps: int = 0.05e6
     warmup_steps: int = 10_000
     reward_scale: float = 0.001
     num_workers: int = 4
