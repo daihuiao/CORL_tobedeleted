@@ -23,14 +23,19 @@ from torch.nn import functional as F
 from torch.utils.data import DataLoader, IterableDataset
 from tqdm.auto import tqdm, trange  # noqa
 from tqdm import trange
-
+import neorl
 TensorBatch = List[torch.Tensor]
 
 
 @dataclass
 class TrainConfig:
+    data_type = "high" # ["high", "medium", "low"]
+    # device: str = "cuda:1"
+    device: str = "cpu"
+    env: str = "Ib"  # OpenAI gym environment name
+
     # wandb params
-    project: str = "paper2_DT"
+    project: str = "paper2_DT_neorl"
     # group: str = "DT-D4RL"
     name: str = "DT"
     num_agents: int = 1
@@ -46,7 +51,7 @@ class TrainConfig:
     embedding_dropout: float = 0.1
     max_action: float = 1.0
     # training params
-    env: str = "halfcheetah-medium-replay-v2"
+
     learning_rate: float = 1e-4
     betas: Tuple[float, float] = (0.9, 0.999)
     weight_decay: float = 1e-4
@@ -64,7 +69,7 @@ class TrainConfig:
     checkpoints_path: Optional[str] = None
     deterministic_torch: bool = False
     seed: int = 10
-    device: str = "cuda"
+
 
     def __post_init__(self):
         self.name = f"{self.env}-seed{self.seed}-num_agents{self.num_agents}-{self.name}-{str(uuid.uuid4())[:8]}"
@@ -143,9 +148,20 @@ def discounted_cumsum(x: np.ndarray, gamma: float) -> np.ndarray:
 
 
 def load_d4rl_trajectories(
-        env: str, gamma: float = 1.0
+        env: str,config, gamma: float = 1.0
 ) -> Tuple[List[DefaultDict[str, np.ndarray]], Dict[str, Any]]:
-    dataset = gym.make(env).get_dataset()
+    # dataset = gym.make(env).get_dataset()
+    # dataset = gym.make("hopper-expert-v2").get_dataset()
+    env = neorl.make(config.env)
+    # Get 100 trajectories of low level policy collection on citylearn task
+    train_data, val_data = env.get_dataset(data_type=config.data_type, train_num=100)
+    dataset = {}
+    dataset["observations"] = np.array(train_data["obs"])
+    dataset["actions"] = np.array(train_data["action"])
+    dataset["rewards"] = np.array(train_data["reward"].squeeze())
+    dataset["terminals"] = np.array(train_data["done"].squeeze())
+    dataset["next_observations"] = np.array(train_data["next_obs"])
+
     traj, traj_len = [], []
 
     data_ = defaultdict(list)
@@ -154,7 +170,7 @@ def load_d4rl_trajectories(
         data_["actions"].append(dataset["actions"][i])
         data_["rewards"].append(dataset["rewards"][i])
 
-        if dataset["terminals"][i] or dataset["timeouts"][i]:
+        if dataset["terminals"][i] :
             episode_data = {k: np.array(v, dtype=np.float32) for k, v in data_.items()}
             # return-to-go if gamma=1.0, just discounted returns else
             episode_data["returns"] = discounted_cumsum(
@@ -470,7 +486,7 @@ class Decision_trainer:
 
 
 def dataset_info(config):
-    dataset, info = load_d4rl_trajectories(config.env, gamma=1.0)
+    dataset, info = load_d4rl_trajectories(config.env,config, gamma=1.0)
     sub_datasets = []
     num_agents = 10  # todo 把数据集分为10份
     intervel = len(dataset) // num_agents
@@ -495,6 +511,12 @@ def train(config: TrainConfig):
         DataLoader(datasets[i], batch_size=config.batch_size, pin_memory=True, num_workers=config.num_workers, ) for i
         in range(config.num_agents)]
     # evaluation environment with state & reward preprocessing (as in dataset above)
+    # eval_env = wrap_env(
+    #     env=gym.make(config.env),
+    #     state_mean=datasets[0].state_mean,
+    #     state_std=datasets[0].state_std,
+    #     reward_scale=config.reward_scale,
+    # )
     eval_env = wrap_env(
         env=gym.make(config.env),
         state_mean=datasets[0].state_mean,

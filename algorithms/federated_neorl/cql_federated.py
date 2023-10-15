@@ -1109,7 +1109,8 @@ def train(config: TrainConfig):
                 seed=config.seed,
             )
             eval_score = eval_scores.mean()
-            normalized_eval_score = env.get_normalized_score(eval_score) * 100.0
+            # normalized_eval_score = env.get_normalized_score(eval_score) * 100.0
+            normalized_eval_score = eval_score
             evaluations.append(normalized_eval_score)
             print("---------------------------------------")
             print(
