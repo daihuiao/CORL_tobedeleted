@@ -518,7 +518,7 @@ def train(config: TrainConfig):
     #     reward_scale=config.reward_scale,
     # )
     eval_env = wrap_env(
-        env=gym.make(config.env),
+        env=neorl.make(config.env),
         state_mean=datasets[0].state_mean,
         state_std=datasets[0].state_std,
         reward_scale=config.reward_scale,
@@ -596,7 +596,8 @@ def train(config: TrainConfig):
                 eval_returns.append(eval_return / config.reward_scale)
 
             normalized_scores = (
-                eval_env.get_normalized_score(np.array(eval_returns)) * 100
+                # eval_env.get_normalized_score(np.array(eval_returns)) * 100
+                np.array(eval_returns)
             )
             print("total_iterations", trained_iterations)
             print(f"eval/{target_return}_return_mean", np.mean(eval_returns),

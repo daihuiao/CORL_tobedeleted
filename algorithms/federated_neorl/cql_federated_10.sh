@@ -16,7 +16,7 @@ do
     do
       for num_agents in  3 #num_agents
       do
-        python3 cql_federated.py --env $env_name --seed $seed --num_agents $num_agents --device "cuda:1"
+        python3 cql_federated.py --env $env_name --seed $seed --num_agents $num_agents --device "cuda:1" --data_type $data_type
       done
     done
   done
