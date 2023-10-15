@@ -29,8 +29,8 @@ TensorBatch = List[torch.Tensor]
 
 @dataclass
 class TrainConfig:
-    data_type = "high" # ["high", "medium", "low"]
     # device: str = "cuda:1"
+    data_type :str = "high" # ["high", "medium", "low"]
     device: str = "cpu"
     env: str = "Ib"  # OpenAI gym environment name
 
