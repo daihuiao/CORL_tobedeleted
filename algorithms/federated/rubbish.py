@@ -23,8 +23,8 @@ train_data, val_data = env.get_dataset(data_type = "low", train_num = 100)
 dataset_neorl = {}
 dataset_neorl["observations"] = np.array(train_data["obs"])
 dataset_neorl["actions"] = np.array(train_data["action"])
-dataset_neorl["rewards"] = np.array(train_data["reward"])
-dataset_neorl["terminals"] = np.array(train_data["done"])
+dataset_neorl["rewards"] = np.array(train_data["reward"].squeeze())
+dataset_neorl["terminals"] = np.array(train_data["done"].squeeze())
 dataset_neorl["next_observations"] = np.array(train_data["next_obs"])
 
 

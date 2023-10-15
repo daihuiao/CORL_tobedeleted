@@ -29,8 +29,9 @@ TensorBatch = List[torch.Tensor]
 class TrainConfig:
     # Experiment
     data_type = "high" # ["high", "medium", "low"]
-    device: str = "cuda:1"
-    env: str = "kitchen-partial-v0"  # OpenAI gym environment name
+    # device: str = "cuda:1"
+    device: str = "cpu"
+    env: str = "Ib"  # OpenAI gym environment name
     seed: int = 0  # Sets Gym, PyTorch and Numpy seeds
     eval_freq: int = int(1e4)  # How often (time steps) we evaluate
     n_episodes: int = 10  # How many episodes run during evaluation
@@ -935,8 +936,8 @@ def train(config: TrainConfig):
     dataset = {}
     dataset["observations"] = np.array(train_data["obs"])
     dataset["actions"] = np.array(train_data["action"])
-    dataset["rewards"] = np.array(train_data["reward"])
-    dataset["terminals"] = np.array(train_data["done"])
+    dataset["rewards"] = np.array(train_data["reward"].squeeze())
+    dataset["terminals"] = np.array(train_data["done"].squeeze())
     dataset["next_observations"] = np.array(train_data["next_obs"])
 
     if config.normalize_reward:
